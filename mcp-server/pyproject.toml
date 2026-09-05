@@ -1,0 +1,32 @@
+[project]
+name = "customer-mcp"
+version = "0.1.0"
+description = "MCP server exposing customer lookup and refund tools over stdio, with strict validation"
+readme = "README.md"
+authors = [
+    { name = "Vrajesh-works", email = "vnasit03@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "mcp>=2.1.1",
+    "pydantic>=2",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.14,<0.12.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+# tests/ is on the path so the shared `connected_session` helper imports plainly.
+pythonpath = ["tests"]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+# Every async test runs on asyncio via the `anyio_backend` fixture in conftest.
+addopts = "-ra --strict-markers"
+
+[dependency-groups]
+dev = [
+    "anyio>=4.15.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

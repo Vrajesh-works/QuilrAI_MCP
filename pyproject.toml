@@ -1,0 +1,29 @@
+[tool.uv.workspace]
+# Four deliverables, one environment. Each member keeps its own pyproject and
+# stays independently runnable; the workspace shares only the venv and the
+# lockfile, so a single `uv sync` at the root installs everything.
+members = [
+    "mcp-server",
+    "mcp-gateway",
+    "llm-gateway-guardrail",
+    "llm-gateway-router",
+]
+
+[tool.uv.sources]
+customer-mcp = { workspace = true }
+mcp-gateway = { workspace = true }
+llm-guardrail = { workspace = true }
+llm-router = { workspace = true }
+
+[dependency-groups]
+# Pulling the four members in here is what makes `uv sync` at the root install
+# all of them into the shared environment.
+dev = [
+    "customer-mcp",
+    "mcp-gateway",
+    "llm-guardrail",
+    "llm-router",
+    "anyio>=4.15.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

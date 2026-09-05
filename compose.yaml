@@ -1,0 +1,86 @@
+# The six HTTP services, wired to each other by service name.
+#
+# Not included: the MCP server. It speaks stdio, so it has no port to publish
+# and nothing to connect to - a container would only get in the way of the
+# `claude mcp add` invocation in mcp-server/README.md.
+#
+#   docker compose up --build
+#   docker compose up llm-router         # one service's stack; depends_on pulls
+#                                        # in the providers it needs
+
+x-service: &service
+  build:
+    context: .
+  image: quilrai-mcp:latest
+  restart: unless-stopped
+
+services:
+  # --- MCP security gateway ---------------------------------------------
+  mcp-downstream:
+    <<: *service
+    command: ["python", "-m", "mock_downstream"]
+    environment:
+      MOCK_PORT: "8081"
+    expose: ["8081"]
+
+  mcp-gateway:
+    <<: *service
+    command: ["python", "-m", "mcp_gateway"]
+    environment:
+      MCP_GATEWAY_PORT: "8080"
+      # Service name, not 127.0.0.1: each container has its own loopback.
+      MCP_DOWNSTREAM_URL: "http://mcp-downstream:8081/mcp"
+    ports: ["8080:8080"]
+    depends_on: [mcp-downstream]
+
+  # --- LLM gateway: streaming PII guardrail -----------------------------
+  llm-provider:
+    <<: *service
+    command: ["python", "-m", "mock_provider"]
+    environment:
+      MOCK_PORT: "8091"
+    expose: ["8091"]
+
+  llm-guardrail:
+    <<: *service
+    command: ["python", "-m", "llm_guardrail"]
+    environment:
+      LLM_GUARDRAIL_PORT: "8090"
+      LLM_UPSTREAM_URL: "http://llm-provider:8091/v1/messages"
+    ports: ["8090:8090"]
+    depends_on: [llm-provider]
+
+  # --- LLM gateway: rate limiter and fallback router --------------------
+  model-primary:
+    <<: *service
+    command: ["python", "-m", "mock_model_provider"]
+    environment:
+      MOCK_NAME: "primary"
+      MOCK_PORT: "8101"
+    expose: ["8101"]
+
+  model-fallback:
+    <<: *service
+    command: ["python", "-m", "mock_model_provider"]
+    environment:
+      MOCK_NAME: "fallback"
+      MOCK_PORT: "8102"
+    expose: ["8102"]
+
+  llm-router:
+    <<: *service
+    command: ["python", "-m", "llm_router"]
+    environment:
+      LLM_ROUTER_PORT: "8100"
+      LLM_PRIMARY_URL: "http://model-primary:8101/v1/messages"
+      LLM_FALLBACK_URL: "http://model-fallback:8102/v1/messages"
+      LLM_ROUTER_DB: "/data/router.sqlite"
+    ports: ["8100:8100"]
+    volumes:
+      # The sliding window is on disk by design; a named volume keeps it across
+      # restarts, which is the behaviour test_state_survives_a_restart pins.
+      - router-data:/data
+    depends_on: [model-primary, model-fallback]
+
+volumes:
+  router-data:

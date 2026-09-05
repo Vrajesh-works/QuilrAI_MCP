@@ -1,0 +1,35 @@
+[project]
+name = "mcp-gateway"
+version = "0.1.0"
+description = "MCP security gateway: bearer auth, tool-level authorization, JSON-RPC reverse proxy"
+readme = "README.md"
+authors = [
+    { name = "Vrajesh-works", email = "vnasit03@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "starlette>=1.6.0",
+    "uvicorn>=0.52.4",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# Two packages: the gateway, and the mock server it proxies to.
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_gateway", "src/mock_downstream"]
+
+[tool.pytest.ini_options]
+pythonpath = ["tests"]
+testpaths = ["tests"]
+asyncio_mode = "strict"
+addopts = "-ra --strict-markers"
+
+[dependency-groups]
+dev = [
+    "anyio>=4.15.1",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

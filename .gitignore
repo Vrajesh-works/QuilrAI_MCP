@@ -1,0 +1,10 @@
+
+*.db
+*.py[cod]
+*.sqlite
+*.sqlite3
+.pytest_cache/
+.ruff_cache/
+.venv/
+__pycache__/
+data/
