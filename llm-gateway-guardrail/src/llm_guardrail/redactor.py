@@ -7,14 +7,12 @@ A stream delivers text in arbitrary pieces. A model emitting an SSN might send
 chunk independently finds nothing in either, and the PII goes out intact. This
 is the whole difficulty here: matches straddle chunk boundaries.
 
-The rejected fix
-----------------
-Buffer the entire response, redact once, then send. Correct, and it destroys the
+Buffering the whole response and redacting it once is correct but defeats the
 point of streaming: time-to-first-token becomes time-to-*last*-token, and memory
 grows with response length.
 
-The approach here
------------------
+The approach
+------------
 Keep a small **holdback**: the shortest suffix of pending text that could still
 turn into a match, found with a genuine partial-match engine
 (``regex``'s ``partial=True``). Everything before it can never be part of a

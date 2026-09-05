@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gateway Console</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e9ef;
+    --muted: #8b93a5; --accent: #6ea8fe; --ok: #4ade80; --bad: #f87171;
+    --warn: #fbbf24; --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 20px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: .2px; }
+  header p { margin: 0; color: var(--muted); font-size: 13px; }
+  #status { margin-left: auto; display: flex; gap: 12px; font-size: 12px; }
+  .dot::before {
+    content: "●"; margin-right: 5px; color: var(--muted);
+  }
+  .dot.up::before { color: var(--ok); }
+  .dot.down::before { color: var(--bad); }
+
+  main { padding: 24px; display: grid; gap: 20px; max-width: 1180px; }
+  section {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 20px;
+  }
+  section > h2 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+  section > .hint { margin: 0 0 16px; color: var(--muted); font-size: 13px; }
+
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 7px; }
+  select, input[type=text], input[type=number], textarea {
+    background: #0d0f14; color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; font-family: inherit; font-size: 13px;
+  }
+  textarea { width: 100%; font-family: var(--mono); font-size: 12.5px; resize: vertical; }
+  input[type=range] { accent-color: var(--accent); }
+  button {
+    background: var(--accent); color: #0b1220; border: 0; border-radius: 6px;
+    padding: 8px 16px; font-weight: 600; font-size: 13px; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button:disabled { opacity: .5; cursor: default; filter: none; }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button {
+    background: transparent; color: var(--muted); border-radius: 0;
+    padding: 7px 15px; font-weight: 500;
+  }
+  .seg button.on { background: var(--accent); color: #0b1220; font-weight: 600; }
+
+  pre {
+    background: #0d0f14; border: 1px solid var(--line); border-radius: 8px;
+    padding: 13px; overflow: auto; max-height: 260px; margin: 0;
+    font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+  }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 860px) { .pair { grid-template-columns: 1fr; } }
+  .pair h3 { margin: 0 0 7px; font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; }
+  .stream {
+    background: #0d0f14; border: 1px solid var(--line); border-radius: 8px;
+    padding: 13px; min-height: 128px; font-family: var(--mono); font-size: 12.5px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .stream .cursor { animation: blink 1s steps(2) infinite; color: var(--accent); }
+  @keyframes blink { 50% { opacity: 0; } }
+  mark {
+    background: rgba(248,113,113,.16); color: var(--bad);
+    border: 1px solid rgba(248,113,113,.4); border-radius: 4px; padding: 0 4px; font-weight: 600;
+  }
+  .leak { background: rgba(251,191,36,.16); color: var(--warn); border-radius: 4px; padding: 0 3px; }
+
+  .verdict { margin-top: 14px; padding: 11px 13px; border-radius: 8px; font-size: 13px; border: 1px solid var(--line); }
+  .verdict.ok { border-color: rgba(74,222,128,.4); background: rgba(74,222,128,.08); }
+  .verdict.bad { border-color: rgba(248,113,113,.4); background: rgba(248,113,113,.08); }
+  .verdict b { color: var(--text); }
+
+  .meter { height: 9px; background: #0d0f14; border: 1px solid var(--line); border-radius: 99px; overflow: hidden; }
+  .meter > i { display: block; height: 100%; width: 0; background: var(--ok); transition: width .35s ease, background .35s; }
+  .stats { display: flex; gap: 22px; margin: 12px 0; flex-wrap: wrap; font-size: 13px; }
+  .stats b { display: block; font-size: 19px; font-weight: 600; font-family: var(--mono); }
+  .stats span { color: var(--muted); font-size: 12px; }
+
+  .log { max-height: 210px; overflow: auto; font-family: var(--mono); font-size: 12px; }
+  .log div { padding: 4px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+  .log div:last-child { border-bottom: 0; }
+  .tag { font-weight: 600; }
+  .tag.ok { color: var(--ok); } .tag.bad { color: var(--bad); } .tag.warn { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Gateway Console</h1>
+  <p>Drives the three HTTP gateways. Nothing here is part of the services themselves.</p>
+  <div id="status">
+    <span class="dot" id="s-mcp">mcp-gateway</span>
+    <span class="dot" id="s-guard">guardrail</span>
+    <span class="dot" id="s-router">router</span>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Guardrail ─────────────────────────────────────────────────── -->
+  <section>
+    <h2>Streaming PII redaction</h2>
+    <p class="hint">
+      The provider streams a few characters at a time, so secrets arrive split across
+      chunks. Drop the chunk size to 1&nbsp;&mdash; the redaction still lands, because the
+      redactor holds back only the tail that could still become a match.
+    </p>
+
+    <textarea id="g-text" rows="3">Ada's address is ada.lovelace@example.com and her line is (555) 123-4567. SSN 123-45-6789, card 4111 1111 1111 1111. Order 1234567890123456 is fine.</textarea>
+
+    <div class="row" style="margin-top:12px">
+      <label>chunk size <input type="range" id="g-chunk" min="1" max="40" value="3"><b id="g-chunk-v" style="font-family:var(--mono)">3</b></label>
+      <label>delay <input type="number" id="g-delay" value="18" min="0" max="200" style="width:66px"> ms</label>
+      <button id="g-go">Stream</button>
+    </div>
+
+    <div class="pair">
+      <div>
+        <h3>Raw &mdash; straight from the provider</h3>
+        <div class="stream" id="g-raw"></div>
+      </div>
+      <div>
+        <h3>Through the guardrail</h3>
+        <div class="stream" id="g-safe"></div>
+      </div>
+    </div>
+    <div class="verdict" id="g-verdict" style="display:none"></div>
+  </section>
+
+  <!-- ── MCP gateway ───────────────────────────────────────────────── -->
+  <section>
+    <h2>Tool authorization</h2>
+    <p class="hint">
+      Same call, two roles. A blocked call is answered by the gateway itself &mdash; watch
+      the downstream line to see that the tool never ran.
+    </p>
+
+    <div class="row">
+      <label>role</label>
+      <div class="seg" id="m-role">
+        <button data-role="viewer" class="on">viewer</button>
+        <button data-role="admin">admin</button>
+        <button data-role="none">no token</button>
+      </div>
+
+      <label>tool
+        <select id="m-tool">
+          <option value="search_docs">search_docs</option>
+          <option value="get_ticket">get_ticket</option>
+          <option value="admin_reset_key" selected>admin_reset_key</option>
+          <option value="admin_delete_tenant">admin_delete_tenant</option>
+          <option value="ADMIN_reset_key">ADMIN_reset_key &mdash; casing bypass</option>
+          <option value="__batch__">batch: tools/list + admin_reset_key</option>
+        </select>
+      </label>
+
+      <button id="m-go">Send</button>
+      <button id="m-list" class="ghost">tools/list</button>
+    </div>
+
+    <div class="verdict" id="m-verdict" style="display:none"></div>
+    <pre id="m-out" style="margin-top:12px">Send a request to see the response.</pre>
+  </section>
+
+  <!-- ── Router ────────────────────────────────────────────────────── -->
+  <section>
+    <h2>Rate limiting and failover</h2>
+    <p class="hint">
+      50,000 tokens per minute per key, on a sliding window. Force the primary to fail
+      and the request moves to the backup; spend the budget and it stops being served.
+    </p>
+
+    <div class="row">
+      <label>primary
+        <select id="r-behaviour">
+          <option value="ok">healthy</option>
+          <option value="rate_limited" selected>returns 429</option>
+          <option value="slow">hangs past 3s</option>
+          <option value="error">returns 500</option>
+        </select>
+      </label>
+      <label>tokens used per call <input type="number" id="r-out" value="4000" min="1" max="20000" style="width:86px"></label>
+      <button id="r-go">Send one</button>
+      <button id="r-burst" class="ghost">Send until limited</button>
+      <button id="r-reset" class="ghost">New key</button>
+    </div>
+
+    <div class="stats">
+      <div><b id="r-used">0</b><span>tokens used</span></div>
+      <div><b id="r-remaining">50,000</b><span>remaining</span></div>
+      <div><b id="r-served">0</b><span>served</span></div>
+      <div><b id="r-limited">0</b><span>rate limited</span></div>
+    </div>
+    <div class="meter"><i id="r-meter"></i></div>
+    <div class="log" id="r-log" style="margin-top:14px"></div>
+  </section>
+
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+// Secrets planted in the default prompt. The console re-checks the redacted
+// stream for them rather than trusting the guardrail's own report.
+const SECRETS = [
+  "ada.lovelace@example.com", "(555) 123-4567",
+  "123-45-6789", "4111 1111 1111 1111",
+];
+
+// ── status ──────────────────────────────────────────────────────────
+async function refreshStatus() {
+  try {
+    const health = await (await fetch("/api/health")).json();
+    const map = { "mcp-gateway": "s-mcp", "guardrail": "s-guard", "router": "s-router" };
+    for (const [name, id] of Object.entries(map)) {
+      $(id).className = "dot " + (health[name] ? "up" : "down");
+    }
+  } catch { /* leave the dots neutral if the console itself is mid-restart */ }
+}
+refreshStatus();
+setInterval(refreshStatus, 5000);
+
+// ── guardrail ───────────────────────────────────────────────────────
+$("g-chunk").oninput = (e) => $("g-chunk-v").textContent = e.target.value;
+
+function renderStream(el, text, highlightSecrets) {
+  let html = esc(text).replaceAll("[REDACTED]", "<mark>[REDACTED]</mark>");
+  if (highlightSecrets) {
+    for (const secret of SECRETS) {
+      html = html.replaceAll(esc(secret), `<span class="leak">${esc(secret)}</span>`);
+    }
+  }
+  el.innerHTML = html + '<span class="cursor">▋</span>';
+}
+
+async function streamInto(el, body, highlightSecrets) {
+  const response = await fetch("/api/guardrail", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "", text = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // SSE events are blank-line separated; keep any partial one buffered.
+    const events = buffer.split("\n\n");
+    buffer = events.pop();
+
+    for (const event of events) {
+      for (const line of event.split("\n")) {
+        if (!line.startsWith("data:")) continue;
+        try {
+          const payload = JSON.parse(line.slice(5).trim());
+          if (payload?.delta?.type === "text_delta") {
+            text += payload.delta.text;
+            renderStream(el, text, highlightSecrets);
+          }
+        } catch { /* [DONE] and other non-JSON payloads */ }
+      }
+    }
+  }
+  el.innerHTML = el.innerHTML.replace('<span class="cursor">▋</span>', "");
+  return text;
+}
+
+$("g-go").onclick = async () => {
+  const button = $("g-go");
+  button.disabled = true;
+  $("g-raw").textContent = "";
+  $("g-safe").textContent = "";
+  $("g-verdict").style.display = "none";
+
+  const body = {
+    text: $("g-text").value,
+    chunk_size: Number($("g-chunk").value),
+    delay_ms: Number($("g-delay").value),
+  };
+
+  try {
+    const [raw, safe] = await Promise.all([
+      streamInto($("g-raw"), { ...body, raw: true }, true),
+      streamInto($("g-safe"), body, true),
+    ]);
+
+    const leaked = SECRETS.filter((secret) => safe.includes(secret));
+    const verdict = $("g-verdict");
+    verdict.style.display = "block";
+    verdict.className = "verdict " + (leaked.length ? "bad" : "ok");
+    verdict.innerHTML = leaked.length
+      ? `<b>Leaked:</b> ${leaked.map(esc).join(", ")}`
+      : `<b>Nothing leaked</b> at ${body.chunk_size} character(s) per chunk. ` +
+        `The 16-digit order number is deliberately kept &mdash; it fails the Luhn check, ` +
+        `so it is not a card number.`;
+  } catch (error) {
+    $("g-safe").textContent = "Request failed: " + error;
+  } finally {
+    button.disabled = false;
+  }
+};
+
+// ── mcp gateway ─────────────────────────────────────────────────────
+let role = "viewer";
+$("m-role").onclick = (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  [...$("m-role").children].forEach((child) => child.classList.toggle("on", child === button));
+  role = button.dataset.role;
+};
+
+function mcpPayload(tool) {
+  if (tool === "__batch__") {
+    return [
+      { jsonrpc: "2.0", id: 1, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "admin_reset_key", arguments: {} } },
+    ];
+  }
+  return {
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: { name: tool, arguments: { tenant: "acme", query: "vpn", ticket_id: "T-1" } },
+  };
+}
+
+async function sendMcp(payload) {
+  const button = $("m-go");
+  button.disabled = true;
+  try {
+    const result = await (await fetch("/api/mcp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ role, payload }),
+    })).json();
+
+    $("m-out").textContent = JSON.stringify(result.body, null, 2);
+
+    const items = Array.isArray(result.body) ? result.body : [result.body];
+    const errors = items.filter((item) => item && item.error).map((item) => item.error);
+    const blocked = errors.some((error) => error.code === -32001);
+    const calls = result.downstream_calls;
+
+    const verdict = $("m-verdict");
+    verdict.style.display = "block";
+    verdict.className = "verdict " + (blocked || result.status === 401 ? "bad" : "ok");
+
+    let headline;
+    if (result.status === 401) headline = "<b>401</b> &mdash; rejected before the payload was even parsed.";
+    else if (blocked) headline = "<b>Blocked</b> &mdash; JSON-RPC error <code>-32001 Unauthorized Tool Call</code>.";
+    else if (errors.length) headline = `<b>Error</b> ${errors.map((e) => esc(e.code)).join(", ")}.`;
+    else headline = "<b>Allowed</b> &mdash; the gateway forwarded it.";
+
+    verdict.innerHTML = headline +
+      `<br>downstream server received: ` +
+      (calls.length
+        ? calls.map((call) => `<code>${esc(call)}</code>`).join(", ")
+        : "<b>nothing</b> &mdash; the tool never ran");
+  } catch (error) {
+    $("m-out").textContent = "Request failed: " + error;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+$("m-go").onclick = () => sendMcp(mcpPayload($("m-tool").value));
+$("m-list").onclick = () => sendMcp({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+// ── router ──────────────────────────────────────────────────────────
+let tenant = "sk-tenant-alpha";
+let served = 0, limited = 0;
+
+function logRow(tag, cls, text) {
+  const row = document.createElement("div");
+  row.innerHTML = `<span class="tag ${cls}">${esc(tag)}</span><span>${text}</span>`;
+  $("r-log").prepend(row);
+}
+
+function paintUsage(used, limit) {
+  const percent = Math.min(100, (used / limit) * 100);
+  $("r-used").textContent = used.toLocaleString();
+  $("r-remaining").textContent = Math.max(0, limit - used).toLocaleString();
+  $("r-meter").style.width = percent + "%";
+  $("r-meter").style.background = percent > 90 ? "var(--bad)" : percent > 65 ? "var(--warn)" : "var(--ok)";
+}
+
+async function refreshUsage() {
+  try {
+    const usage = await (await fetch("/api/router/usage?tenant=" + encodeURIComponent(tenant))).json();
+    if (usage.limit_tokens) paintUsage(usage.used_tokens, usage.limit_tokens);
+  } catch { /* the panel is still usable without the gauge */ }
+}
+
+async function sendRouter() {
+  const result = await (await fetch("/api/router", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      tenant,
+      behaviour: $("r-behaviour").value,
+      max_tokens: Number($("r-out").value),
+      output_tokens: Number($("r-out").value),
+    }),
+  })).json();
+
+  if (result.status === 200) {
+    served++;
+    const failed_over = result.provider === "fallback";
+    logRow(failed_over ? "FAILOVER" : "OK", failed_over ? "warn" : "ok",
+      `served by <b>${esc(result.provider)}</b> after ${esc(result.attempts)} attempt(s)`);
+  } else if (result.status === 429) {
+    limited++;
+    logRow("429", "bad", `rate limited &mdash; retry after ${esc(result.retry_after)}s`);
+  } else {
+    logRow(String(result.status), "bad", esc(result.body?.error?.message ?? "failed"));
+  }
+
+  $("r-served").textContent = served;
+  $("r-limited").textContent = limited;
+  await refreshUsage();
+  return result.status;
+}
+
+$("r-go").onclick = async () => {
+  $("r-go").disabled = true;
+  try { await sendRouter(); } finally { $("r-go").disabled = false; }
+};
+
+$("r-burst").onclick = async () => {
+  const button = $("r-burst");
+  button.disabled = true;
+  try {
+    // Stop at the first 429, or after a bounded number of attempts so a
+    // misconfigured limit cannot spin here forever.
+    for (let attempt = 0; attempt < 30; attempt++) {
+      if (await sendRouter() === 429) break;
+    }
+  } finally { button.disabled = false; }
+};
+
+$("r-reset").onclick = () => {
+  tenant = "sk-tenant-" + Math.random().toString(36).slice(2, 8);
+  served = limited = 0;
+  $("r-served").textContent = "0";
+  $("r-limited").textContent = "0";
+  $("r-log").innerHTML = "";
+  logRow("KEY", "ok", `switched to <b>${esc(tenant)}</b> &mdash; a fresh 50,000 token window`);
+  refreshUsage();
+};
+
+refreshUsage();
+</script>
+</body>
+</html>

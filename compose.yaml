@@ -4,7 +4,7 @@
 # and nothing to connect to - a container would only get in the way of the
 # `claude mcp add` invocation in mcp-server/README.md.
 #
-#   docker compose up --build
+#   docker compose up --build            # then open http://localhost:8000
 #   docker compose up llm-router         # one service's stack; depends_on pulls
 #                                        # in the providers it needs
 
@@ -81,6 +81,25 @@ services:
       # restarts, which is the behaviour test_state_survives_a_restart pins.
       - router-data:/data
     depends_on: [model-primary, model-fallback]
+
+  # --- Browser console ---------------------------------------------------
+  # Serves the page and proxies to the three gateways. The proxying is the
+  # point: a page calling them directly from the browser would be blocked as
+  # cross-origin, and the alternative is loosening CORS on every gateway to
+  # suit a demo.
+  console:
+    <<: *service
+    command: ["python", "-m", "demo_console"]
+    environment:
+      CONSOLE_HOST: "0.0.0.0"
+      CONSOLE_PORT: "8000"
+      CONSOLE_MCP_GATEWAY: "http://mcp-gateway:8080"
+      CONSOLE_MCP_DOWNSTREAM: "http://mcp-downstream:8081"
+      CONSOLE_GUARDRAIL: "http://llm-guardrail:8090"
+      CONSOLE_PROVIDER: "http://llm-provider:8091"
+      CONSOLE_ROUTER: "http://llm-router:8100"
+    ports: ["8000:8000"]
+    depends_on: [mcp-gateway, llm-guardrail, llm-router]
 
 volumes:
   router-data:

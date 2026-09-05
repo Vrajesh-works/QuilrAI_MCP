@@ -1,9 +1,9 @@
 # One image for every service in the stack.
 #
-# The uv workspace makes this possible: a single `uv sync` installs all seven
-# packages (four projects plus their mock upstreams) into one environment, so
-# the services differ only by the command compose gives them. Per-project
-# images would mean four builds of an almost identical dependency set.
+# The uv workspace makes this possible: a single `uv sync` installs every
+# package (the services, their mock upstreams and the console) into one
+# environment, so the services differ only by the command compose gives them.
+# Per-project images would mean rebuilding an almost identical dependency set.
 
 FROM ghcr.io/astral-sh/uv:python3.13-bookworm-slim AS builder
 
@@ -22,6 +22,7 @@ COPY mcp-server/pyproject.toml            mcp-server/pyproject.toml
 COPY mcp-gateway/pyproject.toml           mcp-gateway/pyproject.toml
 COPY llm-gateway-guardrail/pyproject.toml llm-gateway-guardrail/pyproject.toml
 COPY llm-gateway-router/pyproject.toml    llm-gateway-router/pyproject.toml
+COPY demo-console/pyproject.toml          demo-console/pyproject.toml
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-install-workspace
@@ -32,6 +33,7 @@ COPY mcp-server/            mcp-server/
 COPY mcp-gateway/           mcp-gateway/
 COPY llm-gateway-guardrail/ llm-gateway-guardrail/
 COPY llm-gateway-router/    llm-gateway-router/
+COPY demo-console/          demo-console/
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen

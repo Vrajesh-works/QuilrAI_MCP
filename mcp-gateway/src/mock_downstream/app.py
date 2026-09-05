@@ -130,6 +130,16 @@ async def handle_post(request: Request) -> Response:
     return JSONResponse(response)
 
 
+async def handle_received(request: Request) -> Response:
+    """Every message this server has been asked to handle.
+
+    A demo/test affordance, not part of the MCP surface - it is what lets a
+    caller prove the negative, that a blocked tool call never arrived here.
+    A real downstream would not expose its request log.
+    """
+    return JSONResponse(received)
+
+
 async def handle_get(request: Request) -> Response:
     """Stands in for the server->client SSE stream of MCP's HTTP transport."""
     return Response(
@@ -147,6 +157,7 @@ def create_app() -> Starlette:
     return Starlette(
         routes=[
             Route("/mcp", handle_post, methods=["POST"]),
+            Route("/_debug/received", handle_received, methods=["GET"]),
             Route("/mcp", handle_get, methods=["GET"]),
             Route("/mcp", handle_delete, methods=["DELETE"]),
         ]

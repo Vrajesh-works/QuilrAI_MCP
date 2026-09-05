@@ -39,9 +39,9 @@ Running a regex over each chunk independently finds nothing in either, and the
 SSN goes out intact. **Matches straddle chunk boundaries** — that is the whole
 difficulty of the problem.
 
-The obvious fix — buffer the whole response, redact once, send — is correct and
-useless: it converts time-to-first-token into time-to-*last*-token and grows
-memory with response length.
+Buffering the whole response and redacting it once is correct but defeats the
+point of streaming: it converts time-to-first-token into time-to-*last*-token
+and grows memory with response length.
 
 ## The approach
 
@@ -67,10 +67,10 @@ empty and text flows straight through.
 | Peak holdback | 27 characters |
 | Output at chunk sizes 1 / 5 / 40 | byte-identical |
 
-## Two bugs this design has to get right
+## Two cases the design has to handle
 
-Both were found by tests in this suite, and both produce *silent* leaks or
-corruption rather than crashes.
+Both produce *silent* leaks or corruption rather than crashes, and both are
+covered by tests.
 
 **1. A complete match can still grow.** `ada.lovelace@example.co` is a complete,
 valid email match. Redact it the moment it appears and the `m` arriving in the

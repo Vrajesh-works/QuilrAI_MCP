@@ -58,10 +58,9 @@ requests admits any number of concurrent ones — precisely when the limit
 matters. And reserving only the prompt would let a tenant sit just under the
 limit and then generate an unbounded completion past it.
 
-The flip side, which one test had to be corrected to reflect: a successful
-request settles *down*, so a 20,000-token reservation that really used 150 gives
-19,850 straight back. Large `max_tokens` values do not deplete a budget; real
-spend does.
+The flip side: a successful request settles *down*, so a 20,000-token
+reservation that really used 150 gives 19,850 straight back. Large `max_tokens`
+values do not deplete a budget; real spend does.
 
 **Eviction is real deletion**, not just exclusion from the sum — expired rows are
 deleted on every admission check, so the table stays bounded (~60 rows at one
@@ -71,10 +70,7 @@ request per second) and the hot query stays fast.
 oldest-first and reports when enough quota will actually have freed up, so a
 client backing off correctly waits the minimum rather than a flat 60 seconds.
 
-## Concurrency: two different mechanisms, two different scopes
-
-This is the part I got wrong first and had to correct, so it is worth being
-precise about.
+## Concurrency: two mechanisms, two scopes
 
 **Within one process**, the admission check is made atomic by the `asyncio.Lock`
 in `Store.execute`. Without it, 50 concurrent 2,000-token requests against a
@@ -85,21 +81,20 @@ admitted. `test_concurrent_requests_cannot_exceed_the_limit` requires exactly 25
 lock provides nothing, and atomicity has to come from the database. That is what
 `BEGIN IMMEDIATE` is for.
 
-The failure mode there is not what I initially assumed. Under `BEGIN DEFERRED`
-both connections read the same WAL snapshot, and the second to write fails with
+Under `BEGIN DEFERRED` both connections read the same WAL snapshot, and the
+second to write fails with
 `SQLITE_BUSY_SNAPSHOT` (`database is locked`). Crucially **`busy_timeout` does
 not retry a snapshot conflict** — so it surfaces as a hard error, and under
 contention the gateway returns 500s instead of rate-limit decisions.
 `BEGIN IMMEDIATE` takes the write lock *before* reading, so the second
 transaction waits and then reads a snapshot that includes the first one's commit.
 
-My first attempt at testing this didn't work: `asyncio.to_thread` dispatches
-quickly enough that two checks finish one after the other and the dangerous
-window never opens — the tests passed with `BEGIN DEFERRED` too, which made them
-worthless as evidence. `tests/test_transactions.py` drives two connections from
-threads and holds one transaction open to force the overlap. **Both tests there
-fail if the mode is changed back to `BEGIN DEFERRED`**, which is what makes them
-worth having.
+Testing this needs care. `asyncio.to_thread` dispatches quickly enough that two
+admission checks finish one after the other, so the dangerous window never opens
+and a test built on `asyncio.gather` passes under either transaction mode.
+`tests/test_transactions.py` drives two connections from threads and holds one
+transaction open to force the overlap; **both tests there fail under
+`BEGIN DEFERRED`**.
 
 Also tested: SQLite calls run on worker threads, so a heartbeat coroutine keeps
 ticking through 100 concurrent admission checks. Blocking calls inline would
