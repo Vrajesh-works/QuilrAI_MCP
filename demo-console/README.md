@@ -19,27 +19,65 @@ uv run python -m demo_console          # :8000
 Point it elsewhere with `CONSOLE_MCP_GATEWAY`, `CONSOLE_GUARDRAIL`,
 `CONSOLE_ROUTER`, `CONSOLE_PROVIDER`, `CONSOLE_MCP_DOWNSTREAM`.
 
-## What each panel shows
+## Panels
 
-**Streaming PII redaction.** The same prompt streamed twice, side by side: raw
-from the provider, and through the guardrail. Drag the chunk size down to 1 and
-the redaction still lands, because the redactor holds back only the tail that
-could still become a match. The console re-checks the redacted text for each
-planted secret itself rather than trusting the guardrail's own report, and the
-16-digit order number stays visible — it fails the Luhn check, so it is not a
-card number.
+### Streaming PII redaction
 
-**Tool authorization.** The same call under `viewer`, `admin` and no token. The
-line that matters is *downstream server received* — a blocked call is answered
-by the gateway itself, so the tool never runs. That comes from the downstream
-server's own request log, not inferred from the error code. The tool list
-includes a casing bypass (`ADMIN_reset_key`) and a batch payload that hides an
-admin call behind a `tools/list`.
+![Streaming PII redaction](./docs/guardrail.png)
 
-**Rate limiting and failover.** Force the primary to 429, hang, or fail, and
-watch the request move to the backup. *Send until limited* spends the budget
-until the window rejects it; the meter is the sliding window, and *New key*
-switches tenant to get a fresh one.
+The same prompt streamed twice: raw from the provider on the left, through the
+guardrail on the right. The left pane highlights each secret that reached the
+client in the clear; the right shows what a real caller would receive.
+
+The capture is at **one character per chunk** — the worst case, where every
+secret arrives split many times over. The redaction still lands, because the
+redactor holds back only the tail that could still become a match rather than
+scanning each chunk in isolation.
+
+The verdict line underneath is the console's own check: it re-scans the redacted
+text for each planted secret instead of trusting the guardrail's report. The
+16-digit order number survives on both sides, since it fails the Luhn check and
+so is not a card number.
+
+### Tool authorization
+
+![Tool authorization](./docs/mcp-gateway.png)
+
+A `viewer` calling `admin_reset_key`. The gateway answers it itself with
+`-32001`, and the payload below shows exactly what the caller receives.
+
+The line that matters is **downstream server received: nothing**. That is read
+from the downstream server's own request log, not inferred from the error code,
+so it is evidence the tool never ran rather than a claim that it did not. Switch
+the role to `admin` and the same call goes through, with the downstream line
+naming the tool it executed.
+
+### Rate limiting and failover
+
+![Rate limiting and failover](./docs/router.png)
+
+The primary is set to return 429, so each request moves to the backup — the
+`FAILOVER` rows, each noting it took two attempts. *Send until limited* keeps
+spending until the window refuses, which is the `429` at the top of the log,
+carrying the `Retry-After` the limiter computed.
+
+The meter is the sliding window: it turns amber then red as the budget fills,
+and the counters separate requests that were served from those refused. *New
+key* switches tenant, which is the quickest way to get a fresh 50,000-token
+window without waiting a minute for the current one to age out.
+
+## Regenerating the screenshots
+
+They are captured from the running stack, so they can be refreshed rather than
+redrawn:
+
+```bash
+docker compose up -d
+uv run python demo-console/scripts/screenshots.py
+```
+
+Each panel is driven to a finished state before capture, so the images show real
+responses from the gateways rather than empty forms.
 
 ## Notes
 

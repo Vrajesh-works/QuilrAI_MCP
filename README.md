@@ -36,15 +36,15 @@ Then open **http://localhost:8000** for the console, or use the ports directly:
 
 ```bash
 # A viewer calling an admin tool is blocked by the gateway itself
-curl -s localhost:8080/mcp   -H 'Authorization: Bearer viewer-token-xyz789'   -H 'content-type: application/json'   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"admin_reset_key"}}'
+curl -s localhost:8080/mcp -H 'Authorization: Bearer viewer-token-xyz789' -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"admin_reset_key"}}'
 # {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"Unauthorized Tool Call",...}}
 
 # PII redacted despite arriving three characters at a time
-curl -sN localhost:8090/v1/messages   -H 'content-type: application/json'   -d '{"stream":true,"chunk_size":3,"text":"ssn is 123-45-6789 done"}'
+curl -sN localhost:8090/v1/messages -H 'content-type: application/json' -d '{"stream":true,"chunk_size":3,"text":"ssn is 123-45-6789 done"}'
 # ...{"text":"[REDACTED] "}...
 
 # Primary returns 429, so the request moves to the backup
-curl -s -D- -o /dev/null localhost:8100/v1/messages   -H 'x-api-key: sk-tenant-alpha'   -H 'content-type: application/json'   -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":100,"behaviour":"rate_limited","fallback_behaviour":"ok"}'
+curl -s -D- -o /dev/null localhost:8100/v1/messages -H 'x-api-key: sk-tenant-alpha' -H 'content-type: application/json' -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":100,"behaviour":"rate_limited","fallback_behaviour":"ok"}'
 # x-gateway-provider: fallback
 ```
 
@@ -95,7 +95,6 @@ collide and three suites fail to import.
 Each directory has its own README covering design decisions, assumptions, and
 how to run it standalone.
 
-
 ## mcp-server
 
 An MCP server over stdio exposing `get_customer_record` and `trigger_refund`,
@@ -122,6 +121,8 @@ bypass), the `admin_` prefix check normalises Unicode and case before matching,
 non-string tool names fail closed, and blocked notifications correctly draw no
 response.
 
+![Tool authorization](./demo-console/docs/mcp-gateway.png)
+
 ## llm-gateway-guardrail
 
 A proxy that redacts PII from LLM responses **as they stream**, without buffering
@@ -139,6 +140,8 @@ tests: a *complete* match at the buffer's end can still grow (`[REDACTED]m`),
 and one pattern's partial match can land inside another's complete match,
 splitting a phone number in half.
 
+![Streaming PII redaction](./demo-console/docs/guardrail.png)
+
 ## llm-gateway-router
 
 Token-aware **sliding window** rate limiting (50,000 tokens/min per tenant key,
@@ -155,3 +158,5 @@ handles multiple workers sharing the SQLite file. Under `BEGIN DEFERRED` the
 second writer hits `SQLITE_BUSY_SNAPSHOT`, which `busy_timeout` does *not*
 retry — a hard error rather than a wait. `test_transactions.py` forces that
 interleaving and fails if the mode is changed back.
+
+![Rate limiting and failover](./demo-console/docs/router.png)
