@@ -45,7 +45,7 @@ async def _get_customer_record(args: GetCustomerRecordInput) -> dict[str, Any]:
 
 
 async def _trigger_refund(args: TriggerRefundInput) -> dict[str, Any]:
-    return store.create_refund(args.customer_id, args.amount, args.reason)
+    return store.create_refund(args.customer_id, args.amount, args.reason, args.idempotency_key)
 
 
 class _ToolSpec(BaseModel):

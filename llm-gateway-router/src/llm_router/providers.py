@@ -37,6 +37,27 @@ class Provider:
     # the primary. 3s is long enough for a healthy provider to start responding
     # and short enough that a stuck one does not hold the client.
     timeout_seconds: float = 3.0
+    # The gateway's own upstream credential. `app.py` strips the caller's key
+    # and this supplies the replacement; both halves are required, since
+    # stripping alone would 401 against any real endpoint and only appears to
+    # work because both providers in the demo are unauthenticated mocks.
+    #
+    # Resolved from the environment at startup, never from a request header, so
+    # a caller cannot influence which credential is used upstream.
+    api_key: str | None = None
+    #: Header the provider expects the credential in.
+    api_key_header: str = "x-api-key"
+
+    @property
+    def is_loopback(self) -> bool:
+        """Whether this URL points somewhere a credential is not needed."""
+        from urllib.parse import urlparse
+
+        host = (urlparse(self.url).hostname or "").lower()
+        return host in {"127.0.0.1", "localhost", "::1"} or host.endswith(".test")
+
+    def auth_headers(self) -> dict[str, str]:
+        return {self.api_key_header: self.api_key} if self.api_key else {}
 
 
 @dataclass
@@ -70,6 +91,22 @@ class Attempt:
 def classify(status_code: int) -> Outcome:
     if status_code == 429:
         return Outcome.RATE_LIMITED
+    if status_code in (401, 403):
+        # Deliberately *not* CLIENT_ERROR. The caller's credential never reaches
+        # a provider - it is stripped and replaced with the gateway's own - so a
+        # 401 or 403 from upstream is never the caller's fault. It means this
+        # gateway's key for this provider is missing, wrong or revoked, which is
+        # a per-provider condition another provider may not share.
+        #
+        # Classifying it as CLIENT_ERROR would suppress failover on the single
+        # most likely real-world misconfiguration, and return a 400-series
+        # `invalid_request_error` blaming the client for it.
+        logger.error(
+            "provider returned %d: the gateway's upstream credential for this provider is "
+            "missing, invalid or revoked. Failing over.",
+            status_code,
+        )
+        return Outcome.UNAVAILABLE
     if status_code >= 500:
         return Outcome.UNAVAILABLE
     if status_code >= 400:
@@ -104,11 +141,15 @@ async def call_provider(
     """
     payload = {**body, "model": provider.model}
     timeout = httpx.Timeout(provider.timeout_seconds)
+    # The gateway's credential is applied last so a relayed client header can
+    # never shadow it. `app.py` strips `authorization`/`x-api-key` from the
+    # incoming request; this supplies the replacement.
+    outbound = {**(headers or {}), **provider.auth_headers()}
 
     start = _now()
     try:
         async with asyncio.timeout(provider.timeout_seconds):
-            response = await client.post(provider.url, json=payload, headers=headers or {}, timeout=timeout)
+            response = await client.post(provider.url, json=payload, headers=outbound, timeout=timeout)
     except (TimeoutError, httpx.TimeoutException) as exc:
         log_and_sanitise(f"provider {provider.name} timed out after {provider.timeout_seconds}s", exc)
         return Attempt(provider, Outcome.TIMEOUT, elapsed_seconds=_now() - start, error=exc)
@@ -135,6 +176,85 @@ async def call_provider(
         status_code=response.status_code,
         body=parsed,
         elapsed_seconds=elapsed,
+    )
+
+
+@dataclass
+class StreamAttempt:
+    """A streaming call that has produced response headers but not yet a body.
+
+    The response is held open. `close()` must be called if the caller decides
+    not to use it, or the connection leaks.
+    """
+
+    provider: Provider
+    outcome: Outcome
+    status_code: int | None = None
+    response: httpx.Response | None = None
+    elapsed_seconds: float = 0.0
+    error: BaseException | None = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.outcome is Outcome.SUCCESS
+
+    @property
+    def should_failover(self) -> bool:
+        return self.outcome in (Outcome.RATE_LIMITED, Outcome.TIMEOUT, Outcome.UNAVAILABLE)
+
+    async def close(self) -> None:
+        if self.response is not None:
+            await self.response.aclose()
+
+
+async def open_provider_stream(
+    client: httpx.AsyncClient,
+    provider: Provider,
+    body: dict[str, Any],
+    headers: dict[str, str] | None = None,
+) -> StreamAttempt:
+    """Start a streaming attempt and return once the status line has arrived.
+
+    Failover for a streaming request can only happen *before* any bytes reach
+    the client - once the status line has been sent downstream there is no way
+    to retract it. Splitting the attempt here is what makes that possible: the
+    router sees the provider's status code while it can still choose a
+    different provider.
+
+    The timeout covers reaching first byte only. A long generation is not a
+    failure, so the read timeout is left off deliberately; the primary's 3s
+    budget is a budget for *starting* to answer.
+    """
+    payload = {**body, "model": provider.model}
+    outbound = {**(headers or {}), **provider.auth_headers()}
+    timeout = httpx.Timeout(provider.timeout_seconds, read=None)
+
+    start = _now()
+    request = client.build_request("POST", provider.url, json=payload, headers=outbound, timeout=timeout)
+    try:
+        async with asyncio.timeout(provider.timeout_seconds):
+            response = await client.send(request, stream=True)
+    except (TimeoutError, httpx.TimeoutException) as exc:
+        log_and_sanitise(f"provider {provider.name} timed out opening a stream", exc)
+        return StreamAttempt(provider, Outcome.TIMEOUT, elapsed_seconds=_now() - start, error=exc)
+    except httpx.HTTPError as exc:
+        log_and_sanitise(f"provider {provider.name} unreachable", exc)
+        return StreamAttempt(provider, Outcome.UNAVAILABLE, elapsed_seconds=_now() - start, error=exc)
+
+    outcome = classify(response.status_code)
+    if outcome is not Outcome.SUCCESS:
+        logger.warning("provider %s returned %d opening a stream (%s)", provider.name, response.status_code, outcome)
+        await response.aclose()
+        return StreamAttempt(
+            provider, outcome, status_code=response.status_code, elapsed_seconds=_now() - start
+        )
+
+    return StreamAttempt(
+        provider=provider,
+        outcome=Outcome.SUCCESS,
+        status_code=response.status_code,
+        response=response,
+        elapsed_seconds=_now() - start,
     )
 
 

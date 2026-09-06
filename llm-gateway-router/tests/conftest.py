@@ -16,8 +16,17 @@ from llm_router.router import Router
 from llm_router.store import Store
 from mock_model_provider.app import create_app as create_provider
 
-TENANT = "sk-tenant-alpha"
-OTHER_TENANT = "sk-tenant-beta"
+# Rate-limit keys used when calling `Router.route` directly. These are already
+# resolved, opaque tenant ids - the router never sees a credential.
+TENANT = "tenant-alpha"
+OTHER_TENANT = "tenant-beta"
+
+# The credentials a client presents over HTTP, and the tenant ids they resolve
+# to. Distinct from the ids on purpose: a test that passed a key straight
+# through as a rate-limit key would not notice if authentication were removed.
+API_KEY = "test-key-alpha"
+OTHER_API_KEY = "test-key-beta"
+TENANT_TABLE = {API_KEY: TENANT, OTHER_API_KEY: OTHER_TENANT}
 
 
 class FakeClock:
@@ -158,6 +167,7 @@ async def gateway(limiter: RateLimiter, db_path: Path) -> AsyncGenerator[httpx.A
         window_seconds=60.0,
         primary=Provider("primary", "http://primary.test/v1/messages", "claude-opus-5", 3.0),
         fallbacks=[Provider("fallback", "http://fallback.test/v1/messages", "claude-sonnet-5", 10.0)],
+        tenants=dict(TENANT_TABLE),
     )
     app = create_app(config)
 

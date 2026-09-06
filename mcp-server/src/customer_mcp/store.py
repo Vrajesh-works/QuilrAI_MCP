@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from customer_mcp.idempotency import IdempotencyConfig, RefundLedger
+
 
 class DomainError(Exception):
     """A valid request whose business outcome is a refusal.
@@ -77,11 +79,36 @@ def _seed() -> dict[str, Customer]:
 
 _store = _Store(customers=_seed())
 
+# The replay ledger is separate from `_store` on purpose. Customer rows and the
+# refund list are an in-memory fixture and are documented as resetting on
+# restart; the record of "this refund has already been paid" must not, because a
+# restart is precisely when a host retries. See `idempotency.py`.
+_ledger: RefundLedger | None = None
+_ledger_lock = threading.Lock()
+
+
+def refund_ledger() -> RefundLedger:
+    with _ledger_lock:
+        global _ledger
+        if _ledger is None:
+            _ledger = RefundLedger()
+        return _ledger
+
+
+def configure_ledger(config: IdempotencyConfig, clock: Any = None) -> None:
+    """Point the ledger at a specific database. For tests and for `__main__`."""
+    global _ledger
+    with _ledger_lock:
+        if _ledger is not None:
+            _ledger.close()
+        _ledger = RefundLedger(config) if clock is None else RefundLedger(config, clock)
+
 
 def reset_store() -> None:
     """Restore seed data and clear the refund ledger. For tests."""
     global _store
     _store = _Store(customers=_seed())
+    refund_ledger().clear()
 
 
 def get_customer(customer_id: str) -> dict[str, Any]:
@@ -109,13 +136,33 @@ def get_customer(customer_id: str) -> dict[str, Any]:
     }
 
 
-def create_refund(customer_id: str, amount: float, reason: str) -> dict[str, Any]:
-    """Issue a refund and decrement the customer's refundable balance.
+def create_refund(
+    customer_id: str, amount: float, reason: str, idempotency_key: str | None = None
+) -> dict[str, Any]:
+    """Issue a refund at most once per logical operation.
+
+    A replayed request returns the original result - same `refund_id`, same
+    balance - and moves no money. `replayed: true` is added so a caller can tell
+    the difference; the refund fields are byte-identical to the first response
+    either way, which is what makes a client-side retry safe.
 
     Raises:
         DomainError: unknown customer, non-active account, or an amount above
-            the remaining refundable balance.
+            the remaining refundable balance. A refusal is not recorded, so the
+            same request may be retried once the cause is fixed.
     """
+    payload, replayed = refund_ledger().run_once(
+        customer_id=customer_id,
+        amount=amount,
+        reason=reason,
+        idempotency_key=idempotency_key,
+        issue=lambda: _issue_refund(customer_id, amount, reason),
+    )
+    return {**payload, "replayed": replayed}
+
+
+def _issue_refund(customer_id: str, amount: float, reason: str) -> dict[str, Any]:
+    """The balance-moving half, called at most once per operation key."""
     with _store.lock:
         customer = _store.customers.get(customer_id)
         if customer is None:

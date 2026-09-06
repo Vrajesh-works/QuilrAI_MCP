@@ -53,10 +53,17 @@ def unknown_tool(tool_name: str, known: list[str]) -> MCPError:
 
     `tools/call` itself is a valid method, but the named tool is not part of
     this server's surface, and METHOD_NOT_FOUND is the closest standard code.
+
+    The caller's tool name is deliberately **not** echoed. `invalid_params`
+    above already refuses to reflect caller input for exactly this reason, and
+    this was its inconsistent sibling: a name is attacker-controlled, it flows
+    into whatever aggregates these errors, and there is no need for it - the
+    caller knows what it asked for, and `available_tools` is what actually helps.
     """
+    logger.info("Rejected a call to an unknown tool: %r", tool_name)
     return MCPError(
         code=METHOD_NOT_FOUND,
-        message=f"Unknown tool: {tool_name!r}",
+        message="Unknown tool.",
         data={"available_tools": sorted(known)},
     )
 

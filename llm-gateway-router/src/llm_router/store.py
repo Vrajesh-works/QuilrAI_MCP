@@ -28,8 +28,8 @@ the gateway would return 500s instead of rate-limit decisions. `BEGIN IMMEDIATE`
 takes the write lock before reading, so the second transaction waits (honouring
 `busy_timeout`) and then reads a snapshot that includes the first one's commit.
 
-`tests/test_transactions.py` forces that interleaving and fails if this is
-changed back to `BEGIN DEFERRED`.
+The test suite forces that interleaving and fails if this becomes
+`BEGIN DEFERRED`.
 """
 
 from __future__ import annotations

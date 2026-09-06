@@ -15,6 +15,7 @@ before the call, corrected afterwards, and given back if nothing was consumed.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,7 +28,14 @@ from llm_router.errors import (
     UPSTREAM_UNAVAILABLE,
     gateway_error,
 )
-from llm_router.providers import Attempt, Outcome, Provider, call_provider
+from llm_router.providers import (
+    Attempt,
+    Outcome,
+    Provider,
+    StreamAttempt,
+    call_provider,
+    open_provider_stream,
+)
 from llm_router.ratelimit import LimitDecision, RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -41,6 +49,14 @@ class RouteResult:
     body: dict[str, Any]
     headers: dict[str, str]
     attempts: list[Attempt]
+    #: Set instead of `body` for a streaming response. The app turns this into a
+    #: `StreamingResponse`; it is never buffered here.
+    stream: AsyncIterator[bytes] | None = None
+    media_type: str | None = None
+
+    @property
+    def is_stream(self) -> bool:
+        return self.stream is not None
 
     @property
     def provider_used(self) -> str | None:
@@ -90,6 +106,8 @@ class Router:
         decision = await self._limiter.check_and_reserve(tenant, reservation_size)
 
         if not decision.allowed:
+            # `tenant` is the resolved, opaque tenant id here, never the
+            # caller's API key, which must never reach a log line.
             logger.info(
                 "Rate limited tenant=%s used=%d/%d requested=%d",
                 tenant, decision.used_tokens, decision.limit, reservation_size,
@@ -111,6 +129,10 @@ class Router:
             )
 
         assert decision.reservation is not None
+
+        if body.get("stream"):
+            return await self._route_stream(tenant, body, headers, decision, reservation_size)
+
         attempts: list[Attempt] = []
 
         try:
@@ -143,6 +165,101 @@ class Router:
             # Nothing was billed for a request that blew up in the gateway.
             await self._limiter.release(decision.reservation)
             raise
+
+    async def _route_stream(
+        self,
+        tenant: str,
+        body: dict[str, Any],
+        headers: dict[str, str] | None,
+        decision: LimitDecision,
+        reserved: int,
+    ) -> RouteResult:
+        """Relay a streaming completion, failing over before the first byte.
+
+        A streaming request needs its own path rather than going through
+        `call_provider`. That helper calls `response.json()`, which raises on a
+        `text/event-stream` body; `parsed` becomes None, the status is 200 so
+        the outcome is SUCCESS, and the router hands back
+        `attempt.body if isinstance(attempt.body, dict) else {}` - HTTP 200 with
+        a body of `{}`. The completion is discarded and the loss is reported to
+        the client as success.
+
+        Failover happens only before any byte reaches the client, which is the
+        only point at which it is possible: once the status line is out, it
+        cannot be retracted.
+        """
+        assert decision.reservation is not None
+        attempts: list[Attempt] = []
+        opened: StreamAttempt | None = None
+
+        try:
+            for provider in self.providers:
+                stream_attempt = await open_provider_stream(self._client, provider, body, headers)
+                attempts.append(
+                    Attempt(
+                        provider=provider,
+                        outcome=stream_attempt.outcome,
+                        status_code=stream_attempt.status_code,
+                        elapsed_seconds=stream_attempt.elapsed_seconds,
+                        error=stream_attempt.error,
+                    )
+                )
+                if stream_attempt.succeeded:
+                    opened = stream_attempt
+                    break
+                if not stream_attempt.should_failover:
+                    await stream_attempt.close()
+                    await self._settle_amount(decision, reserved)
+                    return self._client_error_result(decision, attempts)
+
+            if opened is None:
+                return await self._exhausted(decision, attempts, reserved)
+        except BaseException:
+            await self._limiter.release(decision.reservation)
+            raise
+
+        response = opened.response
+        assert response is not None
+        reservation = decision.reservation
+
+        async def relay() -> AsyncIterator[bytes]:
+            """Pass bytes through untouched, counting usage as they go."""
+            collector = tokens.StreamUsageCollector()
+            settled = False
+            try:
+                async for chunk in response.aiter_bytes():
+                    collector.feed(chunk)
+                    yield chunk
+            finally:
+                await response.aclose()
+                if not settled:
+                    settled = True
+                    # A client that disconnects mid-stream is still charged for
+                    # what the provider generated; the alternative is a free
+                    # unlimited request for anyone willing to hang up.
+                    actual = collector.total
+                    if actual is None:
+                        logger.debug("Stream reported no usage; charging the estimate")
+                        actual = reserved
+                    await self._limiter.settle(reservation, actual)
+
+        content_type = response.headers.get("content-type", "text/event-stream")
+        return RouteResult(
+            status_code=200,
+            body={},
+            headers={
+                **_rate_limit_headers(decision),
+                "x-gateway-provider": opened.provider.name,
+                "x-gateway-attempts": str(len(attempts)),
+            },
+            attempts=attempts,
+            stream=relay(),
+            media_type=content_type.split(";")[0].strip() or "text/event-stream",
+        )
+
+    async def _settle_amount(self, decision: LimitDecision, amount: int) -> None:
+        assert decision.reservation is not None
+        await self._limiter.settle(decision.reservation, amount)
 
     async def _settle(self, decision: LimitDecision, attempt: Attempt, reserved: int) -> None:
         """Correct the reservation to what the request really cost."""

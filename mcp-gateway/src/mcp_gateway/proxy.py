@@ -33,7 +33,14 @@ _HOP_BY_HOP = {
 # The client's credential stops at the gateway. Forwarding it would let the
 # downstream server make its own authorization decisions from a token it should
 # never see, which defeats the point of terminating auth here.
-_STRIP_FROM_CLIENT = {"authorization", *_HOP_BY_HOP}
+#
+# `x-forwarded-user` / `x-forwarded-role` are stripped explicitly rather than
+# relying on the fact that the gateway assigns them *after* the comprehension
+# below. That ordering does make the gateway's values win, but only as an
+# emergent property: a later refactor moving the assignment would hand a client
+# the ability to assert its own role downstream, with no failing test. Stating
+# it as a rule makes the guarantee independent of statement order.
+_STRIP_FROM_CLIENT = {"authorization", "x-forwarded-user", "x-forwarded-role", *_HOP_BY_HOP}
 
 # Set by the downstream server; meaningful to the client, so pass them back.
 _STRIP_FROM_DOWNSTREAM = _HOP_BY_HOP

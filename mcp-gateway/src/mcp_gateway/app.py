@@ -11,7 +11,7 @@ Request flow for POST:
 
 The "downstream is never contacted" part is the security property worth
 protecting: a gateway that forwards and then filters the *response* has already
-let the side effect happen. `test_blocked_calls_never_reach_downstream` pins it.
+let the side effect happen. The test suite pins it.
 """
 
 from __future__ import annotations
@@ -37,6 +37,31 @@ audit = logging.getLogger("mcp_gateway.audit")
 
 def _json_rpc_response(payload: Any, status_code: int = 200) -> JSONResponse:
     return JSONResponse(payload, status_code=status_code)
+
+
+class _BodyTooLarge(Exception):
+    """The request body exceeded the configured cap."""
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    """Read the body, refusing to buffer more than `limit` bytes.
+
+    `await request.body()` reads whatever the client sends, with no cap. A
+    declared `Content-Length` is checked first so an oversized request is
+    refused before a byte of it is buffered, but the streaming check is the one
+    that matters: `Content-Length` is client-supplied, and a chunked request
+    does not carry one at all.
+    """
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise _BodyTooLarge
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise _BodyTooLarge
+    return bytes(body)
 
 
 def _unauthenticated(detail: str) -> JSONResponse:
@@ -70,6 +95,28 @@ def _denial_response(message: jsonrpc.RpcMessage, denial: policy.Denial) -> dict
     )
 
 
+def audit_record(**fields: Any) -> str:
+    """Serialise one audit record as a single line of JSON.
+
+    JSON rather than `decision=%s subject=%s ... tool=%s`, because the tool name
+    is attacker-controlled and a `key=value` format interpolates it into a
+    newline-delimited log with no escaping. A tool named:
+
+        "safe\\ndecision=ALLOW subject=attacker role=admin method=tools/call"
+
+    would forge a second, entirely fictitious audit line, including a fake ALLOW
+    for an admin role. The audit log is the artefact incident response depends
+    on, so being able to write arbitrary entries into it is worse than most of
+    what it records.
+
+    `json.dumps` escapes `\\n`, `\\r`, `\\t`, quotes and control characters by
+    construction, and U+2028/U+2029 cannot terminate a JSON string either. One
+    record is exactly one line, and a parser reads fields rather than guessing
+    at `key=value` boundaries.
+    """
+    return json.dumps(fields, ensure_ascii=True, separators=(",", ":"), sort_keys=True)
+
+
 def _log_decision(principal: Principal, message: jsonrpc.RpcMessage, denial: policy.Denial | None) -> None:
     """Audit every decision.
 
@@ -78,13 +125,15 @@ def _log_decision(principal: Principal, message: jsonrpc.RpcMessage, denial: pol
     incident response actually needs.
     """
     audit.info(
-        "decision=%s subject=%s role=%s method=%s tool=%s%s",
-        "DENY" if denial else "ALLOW",
-        principal.subject,
-        principal.role,
-        message.method,
-        message.tool_name or "-",
-        f" reason={denial.reason}" if denial else "",
+        "%s",
+        audit_record(
+            decision="DENY" if denial else "ALLOW",
+            subject=principal.subject,
+            role=principal.role,
+            method=message.method,
+            tool=message.tool_name,
+            reason=denial.reason if denial else None,
+        ),
     )
 
 
@@ -113,11 +162,21 @@ async def handle_mcp_post(request: Request) -> Response:
     try:
         principal = resolve_principal(request.headers.get("authorization"))
     except AuthError as exc:
-        audit.info("decision=DENY subject=- role=- reason=authentication_failed detail=%s", exc)
+        audit.info("%s", audit_record(decision="DENY", reason="authentication_failed", detail=str(exc)))
         return _unauthenticated(str(exc))
 
     # A body we cannot understand is never forwarded.
-    body = await request.body()
+    try:
+        body = await _read_bounded_body(request, config.max_body_bytes)
+    except _BodyTooLarge:
+        audit.info(
+            "%s",
+            audit_record(decision="DENY", subject=principal.subject, role=principal.role, reason="body_too_large"),
+        )
+        return _json_rpc_response(
+            jsonrpc.error_response(jsonrpc.INVALID_REQUEST, "Request body exceeds the configured limit."),
+            status_code=413,
+        )
     try:
         parsed = jsonrpc.parse_payload(body)
     except jsonrpc.InvalidPayload as exc:
@@ -127,7 +186,7 @@ async def handle_mcp_post(request: Request) -> Response:
     allowed: list[jsonrpc.RpcMessage] = []
     denials: list[dict[str, Any]] = []
     for message in parsed.messages:
-        denial = policy.evaluate(principal, message)
+        denial = policy.evaluate(principal, message, enforce_allowlist=config.enforce_method_allowlist)
         _log_decision(principal, message, denial)
         if denial is None:
             allowed.append(message)
@@ -238,8 +297,14 @@ async def handle_mcp_passthrough(request: Request) -> Response:
         return _unauthenticated(str(exc))
 
     audit.info(
-        "decision=ALLOW subject=%s role=%s method=%s (transport passthrough)",
-        principal.subject, principal.role, request.method,
+        "%s",
+        audit_record(
+            decision="ALLOW",
+            subject=principal.subject,
+            role=principal.role,
+            method=request.method,
+            reason="transport_passthrough",
+        ),
     )
     headers = proxy.build_downstream_headers(request.headers, principal)
 

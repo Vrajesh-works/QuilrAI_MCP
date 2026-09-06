@@ -1,0 +1,69 @@
+name: CI
+
+# There was no CI configuration at all. A suite that nothing runs automatically
+# protects nothing: it only tells you something is broken if a human remembers
+# to ask.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, because the stdio transport claims file descriptors and the
+        # rate limiter depends on SQLite locking - two areas where Windows and
+        # Linux genuinely differ and the tests would not catch it otherwise.
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync the workspace
+        run: uv sync --all-packages
+
+      - name: Test
+        run: uv run python run_tests.py
+
+  lint:
+    # Advisory, not a gate, and deliberately so. This workspace has never had a
+    # linter, a formatter or a type checker configured - there is no ruff, mypy
+    # or pyright in any pyproject and none installed in the environment. Turning
+    # an unconfigured linter into a required check on its first run would block
+    # every pull request on pre-existing style rather than on anything a change
+    # introduced. Make it required once the existing findings are triaged.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Lint (advisory)
+        run: uvx ruff check . --output-format=github
+      - name: Format check (advisory)
+        run: uvx ruff format --check .
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        # The Dockerfile is the deployment artefact for all four services; a
+        # green test run against a broken image is not a green build.
+        run: docker build -t quilr-mcp:ci .

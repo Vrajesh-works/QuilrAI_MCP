@@ -92,9 +92,17 @@ def resolve_principal(header_value: str | None) -> Principal:
     # Compare against every known token rather than a dict lookup, so the work
     # done does not depend on how much of the token matched. A dict hit/miss is
     # a weak timing signal, but constant-time comparison is cheap here.
+    #
+    # The comparison is on UTF-8 bytes, not on `str`. `hmac.compare_digest`
+    # raises TypeError for a `str` containing any non-ASCII character, so a
+    # token with a Unicode hyphen lookalike - `admin‐token-abc123` with U+2010 -
+    # would turn an authentication failure into an unhandled exception and a 500
+    # with a traceback rather than a clean 401. Encoding first makes every
+    # possible token a valid comparison and keeps the timing property.
+    candidate = token.encode("utf-8")
     matched: Principal | None = None
     for known_token, principal in _token_table().items():
-        if hmac.compare_digest(token, known_token):
+        if hmac.compare_digest(candidate, known_token.encode("utf-8")):
             matched = principal
 
     if matched is None:

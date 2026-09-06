@@ -7,6 +7,7 @@ There is no hand-written schema that can drift from the runtime check.
 
 from __future__ import annotations
 
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -18,6 +19,35 @@ CUSTOMER_ID_PATTERN = r"^CUST-\d{5}$"
 
 MAX_REFUND_AMOUNT = 100_000.00
 MIN_REASON_LENGTH = 10
+
+# An upper bound as well as a lower one. Without it a 5 MB `reason` is accepted,
+# serialised twice into the response (once as `TextContent`, once as
+# `structuredContent`) for 10 MB out and seconds of single-threaded CPU, and
+# then retained in the refund ledger forever - a memory-exhaustion path that
+# needs no privileges. The customer id is protected by its anchored pattern; the
+# same discipline belongs on the field next to it.
+#
+# 2,000 characters is roughly a page of prose. It is far more than any real
+# refund justification and far less than anything that costs the server
+# noticeable work.
+MAX_REASON_LENGTH = 2_000
+
+MAX_IDEMPOTENCY_KEY_LENGTH = 128
+
+# Characters that occupy no visual space: control (Cc), format (Cf, which is
+# where U+200B/U+200C/U+200D/U+FEFF live), and the three whitespace separator
+# categories. `str.strip()` removes ASCII whitespace and nothing else, so on its
+# own it would let ten zero-width spaces count as a "meaningful" reason for
+# moving money.
+#
+# Only these are discounted. Letters, digits, punctuation, symbols and emoji all
+# count, in every script - the check must not quietly become "must be English".
+_INVISIBLE_CATEGORIES = frozenset({"Cc", "Cf", "Zs", "Zl", "Zp"})
+
+
+def visible_length(value: str) -> int:
+    """Characters that a human would actually see."""
+    return sum(1 for character in value if unicodedata.category(character) not in _INVISIBLE_CATEGORIES)
 
 
 class StrictModel(BaseModel):
@@ -60,11 +90,24 @@ class TriggerRefundInput(StrictModel):
         examples=[49.99],
     )
     reason: str = Field(
+        max_length=MAX_REASON_LENGTH,
         description=(
-            f"Why the refund is being issued. At least {MIN_REASON_LENGTH} "
-            "characters after leading/trailing whitespace is removed."
+            f"Why the refund is being issued. At least {MIN_REASON_LENGTH} visible "
+            f"characters (whitespace, control and zero-width characters do not "
+            f"count), and at most {MAX_REASON_LENGTH} characters in total."
         ),
         examples=["Duplicate charge on the customer's April invoice."],
+    )
+    idempotency_key: str | None = Field(
+        default=None,
+        max_length=MAX_IDEMPOTENCY_KEY_LENGTH,
+        description=(
+            "Optional caller-supplied identifier for this refund. Retrying with the "
+            "same key returns the original refund instead of issuing a second one. "
+            "When omitted, a request repeating the same customer, amount and reason "
+            "is treated as a retry of the same refund rather than a new one."
+        ),
+        examples=["refund-2026-09-06-a41f"],
     )
 
     @field_validator("amount", mode="before")
@@ -98,15 +141,38 @@ class TriggerRefundInput(StrictModel):
     @field_validator("reason", mode="after")
     @classmethod
     def _meaningful_reason(cls, value: str) -> str:
-        """Length is measured after stripping, so 12 spaces is not a reason.
+        """Length is measured in *visible* characters, so padding is not a reason.
 
-        A plain `min_length=10` would accept it. The stripped value is what gets
-        returned and stored, so the ledger never holds padded whitespace.
+        A plain `min_length=10` accepts twelve spaces. Measuring after
+        `str.strip()` covers that for ASCII and nothing else: ten U+200B
+        zero-width spaces would still pass, putting a semantically empty
+        justification on a money-moving action in the permanent ledger.
+
+        The rule is therefore stated over Unicode categories rather than over a
+        list of remembered characters, so U+00A0, U+3000, U+2028, U+FEFF and the
+        zero-width joiners are all covered by the same sentence. Text in any
+        script counts normally: `visible_length` discounts only characters that
+        render as nothing.
+
+        The stripped value is what gets returned and stored, so the ledger never
+        holds padded whitespace.
         """
         stripped = value.strip()
-        if len(stripped) < MIN_REASON_LENGTH:
+        visible = visible_length(stripped)
+        if visible < MIN_REASON_LENGTH:
             raise ValueError(
-                f"must be at least {MIN_REASON_LENGTH} characters of actual text "
-                f"(got {len(stripped)} after trimming whitespace)"
+                f"must be at least {MIN_REASON_LENGTH} visible characters "
+                f"(got {visible}; whitespace, control and zero-width characters do not count)"
             )
         return stripped
+
+    @field_validator("idempotency_key", mode="after")
+    @classmethod
+    def _usable_idempotency_key(cls, value: str | None) -> str | None:
+        """An empty or invisible key is a client bug, and silently treating it as
+        "no key" would turn an intended replay guard into no guard at all."""
+        if value is None:
+            return None
+        if visible_length(value.strip()) == 0:
+            raise ValueError("must contain at least one visible character when provided")
+        return value.strip()

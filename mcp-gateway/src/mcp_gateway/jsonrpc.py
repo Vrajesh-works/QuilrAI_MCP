@@ -55,6 +55,38 @@ class RpcMessage:
         return name if isinstance(name, str) else None
 
 
+class _DuplicateKey(ValueError):
+    """A JSON object contained the same key twice."""
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Refuse any object with a repeated key.
+
+    The gateway authorizes on the parsed payload but forwards the *original
+    bytes* when nothing is blocked - deliberately, so it does not normalise key
+    order or number formatting on a payload it is only inspecting. That leaves
+    the authorization decision and the downstream execution reading the same
+    bytes with two different parsers.
+
+    For `{"name": "admin_reset", "name": "get_customer_record"}` CPython keeps
+    the *last* key, so the gateway sees `get_customer_record` and allows it. A
+    downstream parser that keeps the first - and several do, including some
+    streaming and hand-rolled implementations - executes `admin_reset`. A
+    CPython downstream is not vulnerable to that, which is precisely why the
+    check belongs here: the divergence would appear silently, with no code
+    change on this side, the day the downstream implementation is swapped.
+
+    Rejecting the payload keeps the byte-relay design intact and costs five
+    lines. No legitimate JSON-RPC client emits duplicate keys.
+    """
+    seen: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in seen:
+            raise _DuplicateKey(f"Duplicate key {key!r} in a JSON object; the request is ambiguous.")
+        seen[key] = value
+    return seen
+
+
 class InvalidPayload(Exception):
     """The body is not a usable JSON-RPC payload. Carries the error to return."""
 
@@ -138,8 +170,8 @@ def parse_payload(body: bytes) -> ParsedPayload:
 
     Batches are the reason this returns a list. A gateway that only inspects
     `payload["method"]` sees nothing in `[{...tools/list...}, {...admin call...}]`
-    and forwards the whole array - the single most common way a filter like this
-    gets bypassed. Every element is parsed and checked individually.
+    and forwards the whole array, which is the single most common way a filter
+    like this is bypassed. Every element is parsed and checked individually.
 
     Raises:
         InvalidPayload: unparseable JSON, or a structurally invalid envelope.
@@ -148,7 +180,9 @@ def parse_payload(body: bytes) -> ParsedPayload:
         raise InvalidPayload(INVALID_REQUEST, "Empty request body.")
 
     try:
-        document = json.loads(body)
+        document = json.loads(body, object_pairs_hook=_reject_duplicate_keys)
+    except _DuplicateKey as exc:
+        raise InvalidPayload(INVALID_REQUEST, str(exc)) from None
     except json.JSONDecodeError as exc:
         raise InvalidPayload(PARSE_ERROR, f"Invalid JSON: {exc.msg}.") from None
 

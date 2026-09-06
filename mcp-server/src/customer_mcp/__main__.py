@@ -15,7 +15,7 @@ stdout must carry nothing but JSON-RPC. Two things guarantee that here:
 Because the SDK performs that redirection, this module must *not* dup2 fd 1
 itself. Doing so before `stdio_server()` starts would leave the transport
 serving JSON-RPC onto stderr, which is exactly the failure the redirect is
-meant to prevent. `tests/test_stdout_purity.py` pins the behaviour.
+meant to prevent. The test suite pins the behaviour.
 """
 
 from __future__ import annotations
@@ -51,12 +51,16 @@ def _emit_demo_noise() -> None:
 
 
 async def _serve() -> None:
-    from mcp.server.stdio import stdio_server
+    from customer_mcp.transport import validating_stdio_server
 
     server = build_server()
     logger.info("Starting %s v%s on stdio", SERVER_NAME, SERVER_VERSION)
 
-    async with stdio_server() as (read_stream, write_stream):
+    # `validating_stdio_server` wraps the SDK's `stdio_server`, answering the
+    # malformed request shapes the SDK silently discards. It leaves the fd 1
+    # claim - and therefore the stdout-purity guarantee documented above -
+    # entirely to the SDK. See `transport.py`.
+    async with validating_stdio_server() as (read_stream, write_stream):
         if os.environ.get("CUSTOMER_MCP_DEMO_NOISE") == "1":
             # Inside the context, where the SDK's descriptor claim is active.
             _emit_demo_noise()

@@ -17,12 +17,20 @@ from mcp.client.session import ClientSession
 from mcp.shared.memory import create_client_server_memory_streams
 
 from customer_mcp import store
+from customer_mcp.idempotency import IdempotencyConfig
 from customer_mcp.server import build_server
 
 
 @pytest.fixture(autouse=True)
-def _clean_store() -> None:
-    """Every test starts from seed data with an empty refund ledger."""
+def _clean_store(tmp_path) -> None:
+    """Every test starts from seed data with an empty refund ledger.
+
+    The replay ledger is a real SQLite file, so each test gets its own under
+    `tmp_path`. Pointing it at `:memory:` would be convenient and would also
+    quietly stop testing the thing that matters - that the record survives the
+    process.
+    """
+    store.configure_ledger(IdempotencyConfig(database_path=str(tmp_path / "ledger.sqlite")))
     store.reset_store()
 
 

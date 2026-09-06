@@ -9,9 +9,10 @@ from contextlib import asynccontextmanager
 import httpx
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from llm_router.auth import AuthError, Tenant, extract_api_key, resolve_tenant
 from llm_router.config import Config
 from llm_router.errors import INVALID_REQUEST, gateway_error
 from llm_router.ratelimit import RateLimiter
@@ -20,40 +21,64 @@ from llm_router.store import Store
 
 logger = logging.getLogger(__name__)
 
-# Headers that must not be relayed upstream: the caller's credential is replaced
-# by the gateway's own per-provider key, and lengths change when the body is
-# rewritten with the provider's model name.
+# Headers that must not be relayed upstream: the caller's credential is dropped
+# here and replaced in `call_provider` by the gateway's own per-provider key
+# (`Provider.api_key`), and lengths change when the body is rewritten with the
+# provider's model name.
 _DROP_HEADERS = {"host", "content-length", "connection", "transfer-encoding", "keep-alive", "authorization", "x-api-key"}
 
+# A Messages request is prose and tool definitions, not a file upload.
+MAX_BODY_BYTES = 4_194_304
 
-def _tenant_of(request: Request) -> str | None:
-    """The tenant API key identifying who to bill.
 
-    Accepts either header the Anthropic SDKs send. Rate limiting is per key, so
-    a request without one cannot be accounted for and is refused.
+class _BodyTooLarge(Exception):
+    """The request body exceeded the configured cap."""
+
+
+async def _read_bounded_body(request: Request, limit: int) -> bytes:
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise _BodyTooLarge
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > limit:
+            raise _BodyTooLarge
+    return bytes(body)
+
+
+def _authenticate(request: Request) -> Tenant:
+    """Resolve the caller's API key to an opaque tenant id.
+
+    Raises:
+        AuthError: no key, or a key that is not recognised.
     """
-    header = request.headers.get("x-api-key") or request.headers.get("authorization", "")
-    if header.lower().startswith("bearer "):
-        header = header[7:]
-    return header.strip() or None
+    config: Config = request.app.state.config
+    api_key = extract_api_key(request.headers.get("x-api-key"), request.headers.get("authorization"))
+    return resolve_tenant(
+        api_key, config.tenants, allow_unauthenticated=config.allow_unauthenticated_tenants
+    )
+
+
+def _unauthenticated(exc: AuthError) -> JSONResponse:
+    return JSONResponse(gateway_error(INVALID_REQUEST, str(exc)), status_code=401)
 
 
 async def handle_messages(request: Request) -> Response:
     router: Router = request.app.state.router
 
-    tenant = _tenant_of(request)
-    if tenant is None:
+    try:
+        tenant = _authenticate(request)
+    except AuthError as exc:
+        return _unauthenticated(exc)
+
+    try:
+        raw = await _read_bounded_body(request, MAX_BODY_BYTES)
+    except _BodyTooLarge:
         return JSONResponse(
-            gateway_error(INVALID_REQUEST, "An API key is required, via x-api-key or Authorization: Bearer."),
-            status_code=401,
+            gateway_error(INVALID_REQUEST, "Request body exceeds the configured limit."), status_code=413
         )
 
-    # INCOMPLETE: `stream: true` is accepted and forwarded, but usage arrives in
-    # a terminal message_delta event rather than a JSON body, so `actual_tokens`
-    # finds none and the request settles at its estimate instead of its real
-    # cost. Correct accounting needs the reservation settled from the parsed
-    # stream; llm-gateway-guardrail has the SSE parser this would build on.
-    raw = await request.body()
     try:
         body = json.loads(raw) if raw else {}
     except json.JSONDecodeError:
@@ -66,19 +91,31 @@ async def handle_messages(request: Request) -> Response:
         )
 
     forwarded = {key: value for key, value in request.headers.items() if key.lower() not in _DROP_HEADERS}
-    result = await router.route(tenant, body, forwarded)
+    result = await router.route(tenant.id, body, forwarded)
+
+    if result.is_stream:
+        # A streaming completion is relayed as a stream. Returning
+        # `JSONResponse(result.body)` here is what produced HTTP 200 with an
+        # empty object and threw the completion away.
+        return StreamingResponse(
+            result.stream,
+            status_code=result.status_code,
+            headers=result.headers,
+            media_type=result.media_type or "text/event-stream",
+        )
 
     return JSONResponse(result.body, status_code=result.status_code, headers=result.headers)
 
 
 async def handle_usage(request: Request) -> Response:
     """Current window usage for the calling key. Useful for demos and clients."""
-    tenant = _tenant_of(request)
-    if tenant is None:
-        return JSONResponse(gateway_error(INVALID_REQUEST, "An API key is required."), status_code=401)
+    try:
+        tenant = _authenticate(request)
+    except AuthError as exc:
+        return _unauthenticated(exc)
 
     limiter: RateLimiter = request.app.state.limiter
-    used = await limiter.usage(tenant)
+    used = await limiter.usage(tenant.id)
     return JSONResponse({"used_tokens": used, "limit_tokens": limiter.limit, "remaining_tokens": max(0, limiter.limit - used)})
 
 
@@ -92,6 +129,9 @@ def create_app(config: Config | None = None) -> Starlette:
 
     @asynccontextmanager
     async def lifespan(app: Starlette):
+        # Before anything is served. A configuration that cannot work should
+        # fail here, loudly and once, rather than per-request in production.
+        config.validate()
         store = Store(config.database_path)
         limiter = RateLimiter(store, limit=config.token_limit, window_seconds=config.window_seconds)
         async with httpx.AsyncClient() as client:

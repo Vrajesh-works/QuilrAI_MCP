@@ -99,19 +99,34 @@ async def test_non_streaming_response_is_also_redacted(guardrail):
     assert "ada@example.com" not in json.dumps(body)
 
 
-async def test_thinking_deltas_are_not_treated_as_response_text():
-    """Only text_delta carries response text; rewriting others corrupts a block."""
+async def test_thinking_deltas_are_dropped_rather_than_relayed():
+    """Rewritten from a test that asserted the leak was correct.
+
+    This test used to assert `b"thinking" in out` - i.e. it pinned as *correct*
+    the behaviour of relaying a thinking block verbatim. It is true that
+    rewriting the text invalidates the block's `signature`, so redacting a
+    thinking block corrupts it. But that is an argument for not sending the
+    block, not for sending PII: extended thinking restates the user's own input,
+    so a `thinking_delta` is one of the more likely places for an SSN to appear.
+
+    The policy is therefore DROP, and `GUARDRAIL_THINKING_POLICY` exists for
+    deployments that would rather have a corrupt signature than a missing block.
+    """
 
     async def upstream():
-        payload = {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "x"}}
+        payload = {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "the ssn is 123-45-6789"},
+        }
         yield f"event: content_block_delta\ndata: {json.dumps(payload)}\n\n".encode()
 
     out = b""
     async for chunk in redact_sse_stream(upstream(), StreamRedactor()):
         out += chunk
 
-    assert b"thinking_delta" in out
-    assert b"thinking" in out
+    assert out == b"", "a thinking block must not reach the client under the default policy"
+    assert b"123-45-6789" not in out
 
 
 async def test_upstream_failure_is_sanitised(unreachable_guardrail):

@@ -8,3 +8,5 @@
 .venv/
 __pycache__/
 data/
+# Measurements written by llm-gateway-guardrail/tests/test_performance.py.
+perf-observations.json

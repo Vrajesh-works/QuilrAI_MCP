@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from conftest import TENANT, message_body
+from conftest import API_KEY, TENANT, message_body
 
 pytestmark = pytest.mark.asyncio
 
@@ -143,31 +143,33 @@ class TestHttpSurface:
         assert response.json()["error"]["type"] == "invalid_request_error"
 
     async def test_bearer_and_x_api_key_are_both_accepted(self, gateway):
-        for headers in ({"x-api-key": TENANT}, {"authorization": f"Bearer {TENANT}"}):
+        for headers in ({"x-api-key": API_KEY}, {"authorization": f"Bearer {API_KEY}"}):
             response = await gateway.post("/v1/messages", json=message_body(), headers=headers)
             assert response.status_code == 200, headers
 
     async def test_malformed_json_is_rejected(self, gateway):
         response = await gateway.post(
-            "/v1/messages", content=b"{not json", headers={"x-api-key": TENANT, "content-type": "application/json"}
+            "/v1/messages", content=b"{not json", headers={"x-api-key": API_KEY, "content-type": "application/json"}
         )
 
         assert response.status_code == 400
         assert response.json()["error"]["type"] == "invalid_request_error"
 
     async def test_body_without_messages_is_rejected(self, gateway):
-        response = await gateway.post("/v1/messages", json={"max_tokens": 10}, headers={"x-api-key": TENANT})
+        response = await gateway.post("/v1/messages", json={"max_tokens": 10}, headers={"x-api-key": API_KEY})
 
         assert response.status_code == 400
 
     async def test_the_caller_credential_is_not_forwarded_upstream(self, gateway):
         """The gateway holds its own provider credentials; the tenant key is an
         identity for billing, not something the provider should see."""
-        await gateway.post("/v1/messages", json=message_body(), headers={"x-api-key": TENANT})
+        await gateway.post("/v1/messages", json=message_body(), headers={"x-api-key": API_KEY})
 
         forwarded = gateway.primary_app.state.received
         assert len(forwarded) == 1
-        # The body is what reaches the provider; the tenant key must not be in it.
+        # The body is what reaches the provider; neither the caller's credential
+        # nor the tenant id it resolves to may appear in it.
+        assert API_KEY not in json.dumps(forwarded[0])
         assert TENANT not in json.dumps(forwarded[0])
 
     async def test_rate_limit_returns_429_over_http(self, gateway):
@@ -178,7 +180,7 @@ class TestHttpSurface:
         actually reported. Only real spend depletes the window - which is the
         behaviour that makes the reserve/settle design worth having.
         """
-        headers = {"x-api-key": TENANT}
+        headers = {"x-api-key": API_KEY}
         body = message_body(max_tokens=9_000, output_tokens=9_000)
 
         limited = None
@@ -195,7 +197,7 @@ class TestHttpSurface:
 
     async def test_a_successful_request_settles_below_its_reservation(self, gateway):
         """The reservation is a ceiling, not a charge."""
-        headers = {"x-api-key": TENANT}
+        headers = {"x-api-key": API_KEY}
         await gateway.post("/v1/messages", json=message_body(max_tokens=20_000), headers=headers)
 
         usage = (await gateway.get("/v1/usage", headers=headers)).json()
@@ -204,7 +206,7 @@ class TestHttpSurface:
         assert usage["used_tokens"] == 150
 
     async def test_usage_endpoint_reports_the_window(self, gateway):
-        headers = {"x-api-key": TENANT}
+        headers = {"x-api-key": API_KEY}
         await gateway.post("/v1/messages", json=message_body(), headers=headers)
 
         response = await gateway.get("/v1/usage", headers=headers)

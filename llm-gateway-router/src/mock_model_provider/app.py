@@ -6,9 +6,20 @@ something to be simulated with real load.
 
 Knobs (read from the request body, all optional):
     behaviour:   "ok" | "rate_limited" | "slow" | "error" | "bad_request"
+                 | "unauthorized" | "forbidden"
     delay_ms:    how long to sleep before answering (used by "slow")
     output_tokens / input_tokens: usage to report back
     omit_usage:  answer successfully but report no usage at all
+    stream:      answer with `text/event-stream` in the Anthropic shape
+    stream_chunks: how many text deltas to emit (default 3)
+    stream_gap_ms: pause between deltas, so streaming can be shown to be
+                 incremental rather than buffered
+
+`unauthorized`/`forbidden` and `stream` exist because the router had defects
+neither could be reached without them: a 401 from a provider was classified as
+the *caller's* error and suppressed failover, and a streaming response was
+parsed with `response.json()`, discarded, and reported as a 200 with an empty
+body. Both were invisible to a suite whose mocks always returned JSON 200.
 
 Any knob can be overridden for one provider by prefixing it with that
 provider's name: ``{"behaviour": "rate_limited", "fallback_behaviour": "ok"}``
@@ -21,10 +32,61 @@ from __future__ import annotations
 
 import asyncio
 
+import json
+
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
+
+
+def _stream_response(request: Request, body: dict, knob) -> StreamingResponse:
+    """An Anthropic-shaped SSE stream, usage included in the terminal events."""
+    name = request.app.state.name
+    chunks = int(knob("stream_chunks", 3))
+    gap_ms = float(knob("stream_gap_ms", 0))
+    input_tokens = int(knob("input_tokens", 50))
+    output_tokens = int(knob("output_tokens", 100))
+
+    async def events():
+        def frame(event: str, payload: dict) -> bytes:
+            return f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode()
+
+        yield frame(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": "msg_mock_stream",
+                    "role": "assistant",
+                    "model": body.get("model", "unknown"),
+                    "content": [],
+                    "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+                },
+            },
+        )
+        yield frame("content_block_start", {"type": "content_block_start", "index": 0,
+                                            "content_block": {"type": "text", "text": ""}})
+        for index in range(chunks):
+            if gap_ms:
+                await asyncio.sleep(gap_ms / 1000)
+            yield frame(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": f"chunk-{index} from {name}. "},
+                },
+            )
+        yield frame("content_block_stop", {"type": "content_block_stop", "index": 0})
+        yield frame(
+            "message_delta",
+            {"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": output_tokens}},
+        )
+        yield frame("message_stop", {"type": "message_stop"})
+
+    return StreamingResponse(events(), media_type="text/event-stream")
 
 async def handle_messages(request: Request) -> JSONResponse:
     body = await request.json() if await request.body() else {}
@@ -77,6 +139,22 @@ async def handle_messages(request: Request) -> JSONResponse:
             {"type": "error", "error": {"type": "invalid_request_error", "message": "max_tokens exceeds model limit"}},
             status_code=400,
         )
+
+    if behaviour in ("unauthorized", "forbidden"):
+        return JSONResponse(
+            {
+                "type": "error",
+                "error": {
+                    "type": "authentication_error",
+                    # Also deliberately leaky.
+                    "message": "invalid x-api-key for org org_88213 (key sk-live-9f3a...b21, vault prod/eu)",
+                },
+            },
+            status_code=401 if behaviour == "unauthorized" else 403,
+        )
+
+    if knob("stream", False):
+        return _stream_response(request, body, knob)
 
     response = {
         "id": "msg_mock",
