@@ -53,9 +53,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
       - name: Lint (advisory)
-        run: uvx ruff check . --output-format=github
+        run: uvx ruff check . --output-format=github --exit-zero
       - name: Format check (advisory)
-        run: uvx ruff format --check .
+        run: uvx ruff format --check . || true
 
   build:
     runs-on: ubuntu-latest
